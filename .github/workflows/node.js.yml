@@ -1,7 +1,7 @@
 # This workflow will do a clean installation of node dependencies, cache/restore them, build the source code and run tests across different versions of node
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-nodejs
 
-name: Node.js CI
+name: Node.js CI con Seguridad
 
 on:
   push:
@@ -9,68 +9,103 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+  packages: write
 
 jobs:
-  build:
-    name: "Build and Test"
+  build-and-test:
+    name: Compilación y Pruebas
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
+    
     strategy:
       matrix:
         node-version: [18.x, 20.x, 22.x]
+    
     steps:
-      - uses: actions/checkout@v5
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v5
+      - name: 📥 Checkout del código
+        uses: actions/checkout@v4
+      
+      # SAST - Inicializar CodeQL
+      - name: 🔒 Initialize CodeQL (SAST)
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+          queries: security-and-quality
+      
+      - name: 🟢 Configurar Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
-      - run: npm ci
-      - run: npm run build
-      - run: npm run test
-      - name: 'Report Coverage'
-        uses:  davelosert/vitest-coverage-report-action@v2
+      
+      - name: 📦 Instalar dependencias
+        run: npm ci
+      
+      # SCA - npm audit (alternativa a Dependabot)
+      - name: 🔍 npm audit (SCA)
+        run: |
+          echo "🔍 Ejecutando análisis de vulnerabilidades..."
+          npm audit --audit-level=moderate || echo "⚠️ Vulnerabilidades encontradas"
+          npm audit --json > npm-audit-${{ matrix.node-version }}.json || true
+        continue-on-error: true
+      
+      - name: 🏗️ Build del proyecto
+        run: npm run build --if-present
+      
+      - name: 🧪 Ejecutar pruebas
+        run: npm test
+      
+      # SAST - Análisis de CodeQL
+      - name: 🔒 Perform CodeQL Analysis (SAST)
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript"
+      
+      - name: 📊 Subir cobertura de código
+        if: matrix.node-version == '20.x'
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+      
+      - name: 📤 Subir reporte de npm audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report-${{ matrix.node-version }}
+          path: npm-audit-${{ matrix.node-version }}.json
+          retention-days: 30
 
   package-and-publish:
-    needs:
-      - build
-
-    name: 🐳 Package & Publish
+    name: Package & Publish
+    needs: build-and-test
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Set up Docker Buildx
+      - name: 📥 Checkout del código
+        uses: actions/checkout@v4
+      
+      - name: 🐳 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Sign in to GitHub Container Registry
+      
+      - name: 🔐 Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          registry: ghcr.io
-
-      - name: Generate Docker Metadata
-        id: meta
-        uses: docker/metadata-action@v5
+      
+      - name: 🏗️ Build and push Docker image
+        uses: docker/build-push-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=tag
-            type=ref,event=pr
-            type=sha,event=branch,prefix=,suffix=,format=short
-
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v6
-        with:
+          context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
