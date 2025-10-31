@@ -1,7 +1,4 @@
-# This workflow will do a clean installation of node dependencies, cache/restore them, build the source code and run tests across different versions of node
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-nodejs
-
-name: Node.js CI
+name: Node.js CI con Seguridad
 
 on:
   push:
@@ -9,36 +6,84 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+  packages: write
 
 jobs:
-  build:
-    name: "Build and Test"
+  build-and-test:
+    name: Compilación y Pruebas Unitarias
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
+
     strategy:
       matrix:
         node-version: [18.x, 20.x, 22.x]
+
     steps:
-      - uses: actions/checkout@v5
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v5
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+
+      # ==========================================
+      # SAST - Inicializar CodeQL
+      # ==========================================
+      - name: Initialize CodeQL (SAST)
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
-      - run: npm ci
-      - run: npm run build
-      - run: npm run test
-      - name: 'Report Coverage'
-        uses:  davelosert/vitest-coverage-report-action@v2
+
+      - name: Install Dependencies
+        run: npm ci
+
+      # ==========================================
+      # SCA - Dependency Review (solo en PRs)
+      # ==========================================
+      - name: Dependency Review (SCA)
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          comment-summary-in-pr: true
+          fail-on-severity: moderate
+
+      - name: Build Project
+        run: npm run build --if-present
+
+      - name: Run Tests
+        run: npm test
+
+      - name: Generate Coverage Report
+        if: matrix.node-version == '20.x'
+        run: npm run test:coverage --if-present
+
+      # ==========================================
+      # SAST - Ejecutar Análisis CodeQL
+      # ==========================================
+      - name: Perform CodeQL Analysis (SAST)
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript/node:${{ matrix.node-version }}"
+
+      - name: Upload Coverage Reports
+        if: matrix.node-version == '20.x'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
 
   package-and-publish:
-    needs:
-      - build
-
-    name: 🐳 Package & Publish
+    name: Package & Publish
+    needs: build-and-test
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
     permissions:
       contents: read
       packages: write
@@ -52,9 +97,9 @@ jobs:
       - name: Sign in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          registry: ghcr.io
 
       - name: Generate Docker Metadata
         id: meta
@@ -64,7 +109,8 @@ jobs:
           tags: |
             type=ref,event=tag
             type=ref,event=pr
-            type=sha,event=branch,prefix=,suffix=,format=short
+            type=sha,event-branch,prefix=,suffix=,format=short
+            type=ref,event=branch,prefix=,suffix=,format=short
 
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v6
