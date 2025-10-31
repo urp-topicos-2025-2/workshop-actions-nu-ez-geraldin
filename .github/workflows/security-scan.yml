@@ -1,93 +1,59 @@
-name: Security Scan (SCA Detallado)
+name: Docker Build y Despliegue
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   pull_request:
-    branches: [ "main" ]
-  schedule:
-    - cron: '0 8 * * 1'  # Cada lunes a las 8 AM
-
-permissions:
-  contents: read
-  issues: write
-  pull-requests: write
+    branches: [ main ]
 
 jobs:
-  security-audit:
-    name: 🔒 Análisis de Seguridad
+  # El Job de compilación debe haber terminado exitosamente
+  docker_build:
+    name: Generar Contenedor y Publicar
     runs-on: ubuntu-latest
+    needs: build # 👈 Se asegura de que el Job 'build' de node.js.yml haya pasado
     
+    permissions:
+      contents: read
+      packages: write # Permiso necesario para publicar en GitHub Packages/Registry
+      
     steps:
-      - name: 📥 Checkout del código
+      - name: Descargar Código Fuente
         uses: actions/checkout@v4
+        
+      # Nota: Aquí deberías considerar descargar los artefactos del Job 'build' si son necesarios
+      # - name: Descargar Artefactos del Build
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: build-artifacts-22.x # Ajusta para la versión que quieras usar para el deploy
       
-      - name: 🟢 Configurar Node.js
-        uses: actions/setup-node@v4
+      # Configurar Docker (Configurar Docker)
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Autenticar a GitHub Registry
+      - name: Autenticar a GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          node-version: '20.x'
-          cache: 'npm'
-      
-      - name: 📦 Instalar dependencias
-        run: npm ci
-      
-      - name: 🔍 npm audit detallado
-        id: audit
-        run: |
-          echo "## 🔒 Reporte de Seguridad" > security-report.md
-          echo "" >> security-report.md
-          echo "### 📊 Resumen de npm audit" >> security-report.md
-          echo "\`\`\`" >> security-report.md
-          npm audit >> security-report.md || true
-          echo "\`\`\`" >> security-report.md
-          
-          # Guardar JSON para análisis
-          npm audit --json > npm-audit-full.json || true
-          
-          # Verificar severidad
-          if npm audit --audit-level=high; then
-            echo "✅ No se encontraron vulnerabilidades críticas"
-            echo "status=success" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ Se encontraron vulnerabilidades"
-            echo "status=warning" >> $GITHUB_OUTPUT
-          fi
-        continue-on-error: true
-      
-      - name: 📋 Listar dependencias desactualizadas
-        run: |
-          echo "" >> security-report.md
-          echo "### 📦 Paquetes desactualizados" >> security-report.md
-          echo "\`\`\`" >> security-report.md
-          npm outdated >> security-report.md || true
-          echo "\`\`\`" >> security-report.md
-        continue-on-error: true
-      
-      - name: 📤 Subir reportes
-        if: always()
-        uses: actions/upload-artifact@v4
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Generar metadatos de contenedor
+      - name: Generar Metadata Docker
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          name: security-reports
-          path: |
-            security-report.md
-            npm-audit-full.json
-          retention-days: 90
-      
-      - name: 💬 Comentar en PR
-        if: github.event_name == 'pull_request' && steps.audit.outputs.status == 'warning'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const report = fs.readFileSync('security-report.md', 'utf8');
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+            type=sha,format=short
             
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: '## ⚠️ Alerta de Seguridad\n\n' + 
-                    'Se encontraron vulnerabilidades en las dependencias.\n\n' +
-                    '<details>\n<summary>📋 Ver reporte completo</summary>\n\n' +
-                    report + '\n</details>\n\n' +
-                    '**Acción recomendada:** Ejecuta `npm audit fix` localmente.'
-            });
+      # Construir y versionar imagen
+      - name: Construir y Versionar Imagen
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }} # Solo hace push en 'push' a main
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
